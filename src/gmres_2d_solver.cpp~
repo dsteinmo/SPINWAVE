@@ -1021,20 +1021,20 @@ void Cheb_2dmg::matrix_multiply(ubox * & lhs, fbox * & rhs) {
          // Left and right
          if (rhs->gridbox->lbound(firstDim) == 0) {
             (*rhs->gridbox)(0,0,all) = dir_xbc*(*lhs->gridbox)(0,0,all) +
-               neum_xbc*(dx_left*dx(0,0,all)+dz_left*dz(0,0,all));
+               neum_bc*(dx_left*dx(0,0,all)+dz_left*dz(0,0,all));
          }
          if (rhs->gridbox->ubound(firstDim) == szx-1) {
             (*rhs->gridbox)(szx-1,0,all) = dir_xbc*(*lhs->gridbox)(szx-1,0,all) +
-               neum_xbc*(dx_right*dx(szx-1,0,all) + dz_right*dz(szx-1,0,all));
+               neum_bc*(dx_right*dx(szx-1,0,all) + dz_right*dz(szx-1,0,all));
          }
 //   SYNC(cerr << *rhs->gridbox;cerr.flush());
       }
 //      cerr << dx_bot << dz_bot;
       // Top and bottom
       (*rhs->gridbox)(all,0,0) = dir_zbc*(*lhs->gridbox)(all,0,0) +
-         neum_zbc*(dx_bot*dx(all,0,0)+dz_bot*dz(all,0,0));
+         neum_bc*(dx_bot*dx(all,0,0)+dz_bot*dz(all,0,0));
       (*rhs->gridbox)(all,0,szz-1) = dir_zbc*(*lhs->gridbox)(all,0,szz-1) +
-         neum_zbc*(dx_top*dx(all,0,szz-1)+dz_top*dz(all,0,szz-1));
+         neum_bc*(dx_top*dx(all,0,szz-1)+dz_top*dz(all,0,szz-1));
 //   SYNC(cerr << *rhs->gridbox;cerr.flush());
    }
    if (indefinite_problem) {

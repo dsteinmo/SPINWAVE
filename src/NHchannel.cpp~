@@ -1,0 +1,635 @@
+#include "TArray.hpp"
+#include <blitz/array.h>
+#include "T_util.hpp"
+#include "Par_util.hpp"
+#include <mpi.h>
+#include <stdio.h>
+#include <math.h>
+#include <iostream>
+#include <vector>
+#include "Splits.hpp"
+#include <random/normal.h>
+#include <fstream>
+#include "Parformer.hpp"
+#include <stdlib.h>
+#include <stdio.h>
+#include "gmres.hpp"
+#include "gmres_2d_solver.hpp"
+#include "gmres_2d_solver_impl.hpp"
+#include "grad.hpp"
+#include "chebmat.hpp"
+
+using namespace TArrayn;
+using namespace Transformer;
+
+using blitz::Array;
+using blitz::TinyVector;
+using blitz::GeneralArrayStorage;
+using blitz::Range;
+
+using ranlib::Normal;
+
+using namespace std;
+
+// Grid size
+
+#define Nx 64
+#define Ny 64
+
+// Grid lengths
+
+//#define Lx 2000.0
+//#define Ly 4000.0 //using these works
+
+#define Lx 4000.0   //using these does
+#define Ly 2000.0
+
+// Defines for physical parameters
+#define G (0.03*9.81)
+#define EARTH_OMEGA (2*M_PI/(24*3600))
+#define EARTH_RADIUS (6371e3)
+#define LATITUDE (M_PI/2)
+//#define ROT_F (10.0*1.5e-3)
+#define ROT_F (7.8828e-5)
+//#define ROT_F (2*EARTH_OMEGA*sin(LATITUDE))
+#define ROT_B (0*2*EARTH_OMEGA*cos(LATITUDE)/EARTH_RADIUS)
+#define H0 (12.8) 
+#define H_DEPTH (H0 + 0*cos(M_PI*y(kk)/Ly)*sin(4*M_PI*x(ii)/Lx))
+
+// Can probably include defines for initial conditions here.
+
+// Timestep parameters
+#define FINAL_T 1200.0
+//#define FINAL_T (3600.0*24.0*3.0)
+#define INITIAL_T 0.0
+#define SAFETY_FACTOR 0.1 //changed from .25 as of Aug 3, 2013.
+//#define SAFETY_FACTOR 0.0025
+#define NUMOUTS 200.0
+
+// Filtering parameters
+#define FILTER_ON true
+#define F_CUTOFF 0.4  //0.4 usually
+#define F_ORDER 4
+#define F_STREN (-0.33)  // ask Chris why negative.
+
+// GMRES parameters
+#define MAXIT 30
+#define TOL 1.0e-8
+#define RESTARTS 1
+#define NOISYGMRES true
+
+// do we want to output at all?
+#define OUTFLAG true
+#define NHOUTFLAG true
+
+// Blitz index placeholders
+
+blitz::firstIndex ii;
+blitz::secondIndex jj;
+blitz::thirdIndex kk;
+
+int main(int argc, char ** argv) {
+   // Initialize MPI
+   MPI_Init(&argc, &argv);
+
+   // make grids
+   Array<double,1> x(Nx), y(Ny);
+   // matrices for dealing with imposing Neuman bc's on eta
+   Array<double,2> Dy(Ny,Ny);
+   Array<double,2> neumatinv(2,2);
+
+   x = (ii+0.5)/Nx*2*M_PI;
+   y = -cos(M_PI*ii/(Ny-1));
+
+   // get cheb matrix on [-1,1]
+   Dy = chebmat(Ny);
+
+   //adjust from standard grids to physical grids
+   x = (Lx/2/M_PI)*x(ii);
+   y = Ly*((y(ii)+1)/2);
+
+   //apply Jacobian to get cheb matrix on physical grid.
+   Dy = (-2.0/Ly)*Dy; 
+   // put entries into 2x2 Neuman-imposing matrix
+   double neudet = Dy(0,0)*Dy(Ny-1,Ny-1)-Dy(0,Ny-1)*Dy(Ny-1,0);
+   neumatinv(0,0) = Dy(Ny-1,Ny-1);
+   neumatinv(0,1) = -Dy(0,Ny-1);
+   neumatinv(1,0) = -Dy(Ny-1,0);
+   neumatinv(1,1) = Dy(0,0);
+   neumatinv = (1/neudet)*neumatinv;
+
+   // Get parameters for local array storage
+   TinyVector<int,3> local_lbound, local_extent;
+   GeneralArrayStorage<3> local_storage;
+
+   local_lbound = alloc_lbound(Nx,1,Ny);
+   local_extent = alloc_extent(Nx,1,Ny);
+   local_storage = alloc_storage(Nx,1,Ny);
+
+   // Necessary FFT transformers (for filtering)
+   TransWrapper XY_xform(Nx,1,Ny,FOURIER,NONE,CHEBY);
+
+   // Allocate space for flow variables (3-timesteps for leapfrog)
+   // going with primitive (not conservative) form.
+   vector<DTArray *> u_levels(3);
+   vector<DTArray *> v_levels(3);  
+   vector<DTArray *> eta_levels(3);
+   
+   //Allocate the arrays used in the above
+   u_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
+   u_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
+   u_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
+   v_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
+   v_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
+   v_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
+   eta_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
+   eta_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
+   eta_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
+ 
+   // Allocate array for depth profile  
+   DTArray H(local_lbound,local_extent,local_storage);   
+   // set equal to expression defined in pre-processing
+   H = H_DEPTH;
+   double Hmax = max(H);
+   double c0max = sqrt(G*Hmax);
+
+   // set initial conditions
+   //*eta_levels[1] = 0;
+  // *eta_levels[1] = (y(kk)-Ly/2)/Ly; //linear tilt
+   // *eta_levels[1] = cos(M_PI*y(kk)/Ly); //half cosine (like a linear tilt)
+   *eta_levels[1] = (H0/4)*exp(-.1*((y(kk)/1e2)*(y(kk)/1e2))
+                                -1*((x(ii)-0.5*Lx)/3e2)*((x(ii)-0.5*Lx)/3e2));
+
+  // *u_levels[1] = 1;
+  // *u_levels[1] = 0.0;
+   *u_levels[1] = (c0max/H0)*(*eta_levels[1]);
+   
+   *v_levels[1] = 0.0;
+
+   int tstep = 0;  //time-step counter
+   // Compute time-stepping details
+   double dt = SAFETY_FACTOR*fmin(Lx/Nx,Ly/Ny)/c0max;
+   // this assumes uniform spacing in Cheby (y-)direction, should fix.
+   double t = INITIAL_T;
+   double numsteps = (FINAL_T - INITIAL_T)/dt;
+   int outputinterval = (int) floor(numsteps/NUMOUTS);
+   if (master()) printf("Using timestep of %gs, with final time of %gs\n",dt,FINAL_T);
+   if (master()) printf("Reference: C_0_max = %g m/s, dx = %g m, dy = %g m\n",c0max,Lx/Nx,Ly/Ny);
+
+   // initialize output stream for times file, and write out initial time.
+   ofstream timefile;
+   if (master()) {
+       timefile.open("times", ios::out | ios::trunc);
+       timefile << t << "\n";
+       timefile.close();
+   }
+
+   // Allocate space for auxiliary elliptic variable
+   DTArray z(local_lbound,local_extent,local_storage);
+
+
+   if (OUTFLAG == true)  {
+       write_reader(*eta_levels[1],"eta",true);
+       write_reader(*u_levels[1],"u",true);
+       write_reader(*v_levels[1],"v",true);
+       write_reader(H,"H");
+
+       write_array(*eta_levels[1],"eta",tstep/outputinterval); 
+       write_array(*u_levels[1],"u",tstep/outputinterval);
+       write_array(*v_levels[1],"v",tstep/outputinterval);
+       write_array(H,"H");
+
+       if (NHOUTFLAG == true) 
+           write_reader(z,"z",true);
+   }
+   
+   // Allocate space for some temporaries
+   DTArray temp1(local_lbound,local_extent,local_storage),
+           temp2(local_lbound,local_extent,local_storage),
+           temp3(local_lbound,local_extent,local_storage),
+           temp4(local_lbound,local_extent,local_storage);
+
+   // Allocate space for forcing vector
+   DTArray Fx(local_lbound,local_extent,local_storage),
+           Fy(local_lbound,local_extent,local_storage);
+
+   // Allocate space for elliptic problem variable coefficients.
+   DTArray cx(local_lbound,local_extent,local_storage),
+           cxx(local_lbound,local_extent,local_storage),
+           cy(local_lbound,local_extent,local_storage),
+           cyy(local_lbound,local_extent,local_storage);
+
+   // write grids to file
+   temp1 = x(ii) + 0*kk;
+   write_array(temp1,"xgrid");
+   write_reader(temp1,"xgrid");
+ 
+   temp1 = y(kk);
+   write_array(temp1,"ygrid");
+   write_reader(temp1,"ygrid");
+  
+   // Build gradient operator, calling seq: szx,szy,szz, s_exp in x,y,z
+   Grad mygrad(Nx,1,Ny,FOURIER,NONE,CHEBY); // had fourier,fourier,cheby
+   
+   // set (constant) jacobian based on our rectangular grid. 
+   mygrad.set_jac(firstDim,firstDim,2*M_PI/Lx);
+   mygrad.set_jac(secondDim,secondDim,1.0);
+   mygrad.set_jac(thirdDim,thirdDim,-2/Ly); //Cheby grids need the '-' 
+   
+   // set coefficients of elliptic problem
+   cxx = (H*H)/6;  //coeff of z_xx
+   cyy = (H*H)/6;  //coeff of z_yy
+   
+   //cx & cy (coefs of z_x and z_y) are the derivatives of H2o6 
+   //we'll get them numerically.
+   mygrad.setup_array(&cxx,FOURIER,NONE,CHEBY);
+   mygrad.get_dx(&cx);  //get x derivative, store in cx
+   mygrad.get_dz(&cy);  //get y derivative, store in cy 
+
+   //these have been validated against matlab code.
+   /* write_array(cxx,"H2o6");
+   write_reader(cxx,"H2o6");
+   write_array(cx,"H2o6x");
+   write_reader(cx,"H2o6x");
+   write_array(cy,"H2o6y");
+   write_reader(cy,"H2o6y"); */
+
+   
+   // create gmres-2d solver interface
+   Cheb_2dmg a(Nx,Ny);
+  
+   int itercount; //gmres iteration count  
+   double dbc=0.0;
+   double nbc=1.0;
+
+   // set variable coefs (must do before set_grad)
+   a.set_ci(&cx,1);
+   a.set_ci(&cxx,2);
+   a.set_ci(&cy,3);
+   a.set_ci(&cyy,4);
+
+   a.set_grad(&mygrad); // need to do this before set_bc 
+
+   // set_bc, calling sequence is helm, dir., neu., S_EXP ('x' series expans)
+   a.set_bc(-1.0,dbc,nbc,FOURIER,dbc,nbc); // Sign of 'helm' opposite that of 1D code.  %trailing zeros new as of Aug. 3, 2013.
+
+   // Initialize structures that are used by gmres object
+   fbox * init_r = a.alloc_resid();
+   ubox * final_u = a.alloc_basis();
+   
+   //Build the solver object with template class
+   GMRES_Solver<Cheb_2dmg> mysolver(&a);
+
+   // set forcing
+   Fx = 0;
+   Fy = 0;
+
+   double starttime = MPI_Wtime();
+
+   if (master()) printf("Taking Euler Step...\n");
+   {  //Euler step
+      // declare nice references for fields used.
+      DTArray &u_n = *u_levels[1], &v_n = *v_levels[1], &eta_n = *eta_levels[1],
+              &u_p = *u_levels[2], &v_p = *v_levels[2], &eta_p = *eta_levels[2],              &temp = temp1, &rhs = temp2, &a1 = temp3, &a2 = temp4;
+
+      //step eta:
+      //eta_p = eta_n - dt*((eta_n u)_x + (eta_n v)_y)
+      temp = (H+eta_n)*u_n;
+      mygrad.setup_array(&temp,FOURIER,NONE,CHEBY);
+      mygrad.get_dx(&rhs,false);  //get x derivative, store in rhs
+      temp = (H+eta_n)*v_n;
+      mygrad.setup_array(&temp,FOURIER,NONE,CHEBY);
+      mygrad.get_dz(&rhs,true);  //this time, we sum with old result.
+
+      eta_p = eta_n - dt*rhs;
+     
+      if (master()) printf("1 \n"); 
+      // filter free-surface
+      if (FILTER_ON == true)
+        filter3(eta_p,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+
+      //impose explicit Neuman conditions on eta.
+      double neurhs1 = 0.0;
+      double neurhs2 = 0.0;
+      for (int j=local_lbound(0); j<(local_lbound(0)+local_extent(0)); j++) {
+          neurhs1 = sum(-Dy(0,Range(1,Ny-2))*eta_p(j,0,Range(1,Ny-2)));
+          neurhs2 = sum(-Dy(Ny-1,Range(1,Ny-2))*eta_p(j,0,Range(1,Ny-2)));
+      
+          // perform 2x2 matrix product at each point 
+          eta_p(j,0,0) = neumatinv(0,0)*neurhs1 + neumatinv(0,1)*neurhs2;
+          eta_p(j,0,Ny-1) = neumatinv(1,0)*neurhs1+ neumatinv(1,1)*neurhs2;
+      } 
+      //  seems to work pretty good. fixed parallelization bug having to do
+      //  with loop's upper bound.
+
+     /* mygrad.setup_array(&eta_p,FOURIER,NONE,CHEBY);
+      mygrad.get_dz(&temp,false);
+      write_reader(eta_p,"eta1");
+      write_array(eta_p,"eta1");
+      write_reader(temp,"eta1y");
+      write_array(temp,"eta1y");  */
+
+     //form a1 and a2:
+     //nonlinear advection
+     mygrad.setup_array(&u_n,FOURIER,NONE,CHEBY);
+     mygrad.get_dx(&temp,false); //u_x
+     a1 = -u_n*temp;
+     mygrad.get_dz(&temp,false); //u_y
+     a1 = a1 - v_n*temp;
+     
+     mygrad.setup_array(&v_n,FOURIER,NONE,CHEBY);
+     mygrad.get_dx(&temp,false); //v_x
+     a2 = -u_n*temp;
+     mygrad.get_dz(&temp,false); //v_y
+     a2 = a2 - v_n*temp;
+     
+     // pressure gradient
+     mygrad.setup_array(&eta_n,FOURIER,NONE,CHEBY);
+     mygrad.get_dx(&temp,false); //eta_x
+     a1 = a1 - G*temp;
+     mygrad.get_dz(&temp,false); //eta_y
+     a2 = a2 - G*temp;
+     
+     // Coriolis and forcing
+     a1 = a1 + (ROT_F+ROT_B*y(kk))*v_n + Fx;
+     a2 = a2 - (ROT_F+ROT_B*y(kk))*u_n + Fy;
+     //done forming a1 & a2
+     if (master()) printf("2\n");
+
+     //compute - divergence of \vec{a}, store in rhs for helmholtz problem
+     // caught bug: string "false" when converted to bool is true. d'oh.
+     mygrad.setup_array(&a1,FOURIER,NONE,CHEBY);
+     mygrad.get_dx(&temp,false);
+     rhs = -temp;
+     mygrad.setup_array(&a2,FOURIER,NONE,CHEBY);
+     mygrad.get_dz(&temp,false);
+     rhs = rhs - temp;
+
+     //set bc's on RHS  (iteration count improves upon doing this)
+     rhs(Range::all(),0,0)   =-a2(Range::all(),0,0)/cxx(Range::all(),0,0);
+     rhs(Range::all(),0,Ny-1)=-a2(Range::all(),0,Ny-1)/cxx(Range::all(),0,Ny-1); 
+     if (master()) printf("2.25\n");
+     //this should be good now
+    /* write_reader(rhs,"rhs");
+     write_array(rhs,"rhs");
+     write_reader(a1,"a1");
+     write_array(a1,"a1");
+     write_reader(a2,"a2");
+     write_array(a2,"a2");
+     write_reader(temp,"temp");
+     write_array(temp,"temp"); */
+
+
+     //solve for z (non-hydrostatic pressure) with gmres
+     *init_r->gridbox = rhs;
+     if (master()) printf("a\n");
+     /** Code segfaults on next line! **/
+     itercount = mysolver.Solve(final_u,init_r,TOL,MAXIT,RESTARTS);
+     if (master()) printf("b\n");
+     if (master() && NOISYGMRES == true) 
+        cout << "GMRES converged after " << itercount << " iterations." << endl;
+    
+     z = *final_u->gridbox;
+     if (master()) printf("2.5\n");
+     
+     //compute gradient of non-hydrostatic pressure and time-step velocities
+     mygrad.setup_array(&z,FOURIER,NONE,CHEBY);
+     mygrad.get_dx(&temp,false); // z_x
+     u_p = u_n + dt*a1 + dt*cxx*temp;
+     mygrad.get_dz(&temp,false); // z_y
+     v_p = v_n + dt*a2 + dt*cxx*temp;
+
+     //filter fields
+     if (FILTER_ON == true) {
+       filter3(u_p,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+       filter3(v_p,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+     }
+     //Impose BCs on v at y=0,L_y (Dirichlet -> no normal flow)
+     v_p(Range::all(),0,0) =0;
+     v_p(Range::all(),0,Ny-1) = 0;
+     if (master()) printf("2.75\n");
+ 
+  
+    /* write_reader(u_p,"u");
+     write_array(u_p,"u");
+     write_reader(v_p,"v");
+     write_array(v_p,"v");
+     write_reader(z,"z");
+     write_array(z,"z");    */
+
+     if (master()) printf("3\n");
+     //increment time
+     t+=dt;
+     tstep++;
+
+     // Check if it's time to output
+     if(!(tstep % outputinterval) && OUTFLAG == true){
+        if (master())
+            cout << "outputting at t=" << t << "\n";
+
+        write_array(u_p,"u",tstep/outputinterval);
+        write_array(v_p,"v",tstep/outputinterval);
+        write_array(eta_p,"eta",tstep/outputinterval);
+
+        if (NHOUTFLAG == true)
+            write_array(z,"z",tstep/outputinterval);
+
+        //append current time to times file
+        if (master()) {
+            timefile.open ("times", ios::out | ios::app);
+            timefile << t << "\n";
+            timefile.close();
+        }
+     }  // end output 'if'
+
+     // cycle fields for next time-step
+     // really just swapping the pointers around.
+     DTArray * tmp ;
+     tmp = u_levels[0];
+     u_levels[0] = u_levels[1];
+     u_levels[1] = u_levels[2];
+     u_levels[2] = tmp;
+     tmp = v_levels[0];
+     v_levels[0] = v_levels[1];
+     v_levels[1] = v_levels[2];
+     v_levels[2] = tmp;
+     tmp = eta_levels[0];
+     eta_levels[0] = eta_levels[1];
+     eta_levels[1] = eta_levels[2];
+     eta_levels[2] = tmp;
+ 
+   }  //end of Euler step
+
+   // Leapfrog steps
+   if (master()) printf("Entering main loop... (Leapfrog)\n");
+   while (t < FINAL_T) {
+      //make nice references for arrays used
+      DTArray &u_m = *u_levels[0], &v_m = *v_levels[0], &eta_m = *eta_levels[0],
+              &u_n = *u_levels[1], &v_n = *v_levels[1], &eta_n = *eta_levels[1],
+              &u_p = *u_levels[2], &v_p = *v_levels[2], &eta_p = *eta_levels[2],
+              &temp = temp1, &rhs = temp2, &a1 = temp3, &a2 = temp4;
+
+       //update forcing:
+       Fx = 0;
+       Fy = 0;
+
+       //step eta:
+       //eta_p = eta_m - 2*dt*((eta_n u)_x + (eta_n v)_y)
+       temp = (H+eta_n)*u_n;
+       mygrad.setup_array(&temp,FOURIER,NONE,CHEBY);
+       mygrad.get_dx(&rhs,false);  //get x derivative, store in rhs
+       temp = (H+eta_n)*v_n;
+       mygrad.setup_array(&temp,FOURIER,NONE,CHEBY);
+       mygrad.get_dz(&rhs,true);  //this time, we sum with old result.
+
+       eta_p = eta_m - 2*dt*rhs;
+
+       // filter free surface
+       if (FILTER_ON == true)
+         filter3(eta_p,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+
+       //impose explicit Neuman conditions on eta.
+       double neurhs1 = 0.0;
+       double neurhs2 = 0.0;
+       for (int j=local_lbound(0); j<(local_lbound(0)+local_extent(0)); j++) {
+           neurhs1 = sum(-Dy(0,Range(1,Ny-2))*eta_p(j,0,Range(1,Ny-2)));
+           neurhs2 = sum(-Dy(Ny-1,Range(1,Ny-2))*eta_p(j,0,Range(1,Ny-2)));
+
+           // perform 2x2 matrix product at each point 
+           eta_p(j,0,0) = neumatinv(0,0)*neurhs1 + neumatinv(0,1)*neurhs2;
+           eta_p(j,0,Ny-1) = neumatinv(1,0)*neurhs1+ neumatinv(1,1)*neurhs2;
+       }
+
+       //form a1 and a2:
+       //nonlinear advection
+       mygrad.setup_array(&u_n,FOURIER,NONE,CHEBY);
+       mygrad.get_dx(&temp,false); //u_x
+       a1 = -u_n*temp;
+       mygrad.get_dz(&temp,false); //u_y
+       a1 = a1 - v_n*temp;
+
+       mygrad.setup_array(&v_n,FOURIER,NONE,CHEBY);
+       mygrad.get_dx(&temp,false); //v_x
+       a2 = -u_n*temp;
+       mygrad.get_dz(&temp,false); //v_y
+       a2 = a2 - v_n*temp;
+
+       // pressure gradient
+       mygrad.setup_array(&eta_n,FOURIER,NONE,CHEBY);
+       mygrad.get_dx(&temp,false); //eta_x
+       a1 = a1 - G*temp;
+       mygrad.get_dz(&temp,false); //eta_y
+       a2 = a2 - G*temp;
+
+       // Coriolis and forcing
+       a1 = a1 + (ROT_F+ROT_B*y(kk))*v_n + Fx;
+       a2 = a2 - (ROT_F+ROT_B*y(kk))*u_n + Fy;
+       //done forming a1 & a2
+
+       //compute - divergence of \vec{a}, store in rhs for helmholtz problem
+       mygrad.setup_array(&a1,FOURIER,NONE,CHEBY);
+       mygrad.get_dx(&temp,false);
+       rhs = -temp;
+       mygrad.setup_array(&a2,FOURIER,NONE,CHEBY);
+       mygrad.get_dz(&temp,false);
+       rhs = rhs - temp;
+
+       //set bc's on RHS 
+       rhs(Range::all(),0,0)   =-a2(Range::all(),0,0)/cxx(Range::all(),0,0);
+       rhs(Range::all(),0,Ny-1)=-a2(Range::all(),0,Ny-1)/cxx(Range::all(),0,Ny-1); 
+
+       //solve for z (non-hydrostatic pressure) with gmres
+       *init_r->gridbox = rhs;
+
+       itercount = mysolver.Solve(final_u,init_r,TOL,MAXIT,RESTARTS);
+
+       if (master() && NOISYGMRES == true)
+        cout << "GMRES converged after " << itercount << " iterations." << endl;
+
+       z = *final_u->gridbox;
+
+       //compute gradient of NH pressure, then time-step it & velocities
+       mygrad.setup_array(&z,FOURIER,NONE,CHEBY);
+       mygrad.get_dx(&temp,false); // z_x
+       u_p = u_m + 2*dt*(a1 + cxx*temp); //cxx = H2o6
+       mygrad.get_dz(&temp,false); // z_y
+       v_p = v_m + 2*dt*(a2 + cxx*temp); //cxx = H2o6
+
+       //filter velocity
+       if (FILTER_ON == true) {
+         filter3(u_p,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+         filter3(v_p,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+       }
+       //Impose BCs on v at y=0,L_y (Dirichlet -> no normal flow)
+       v_p(Range::all(),0,0) =0;
+       v_p(Range::all(),0,Ny-1) = 0;
+
+
+       //increment time.
+       tstep++;
+       t+=dt;
+
+       // Check if it's time to output
+       if(!(tstep % outputinterval) && OUTFLAG == true){
+          if (master())
+               cout << "outputting at t=" << t << "\n";
+
+           write_array(u_p,"u",tstep/outputinterval);
+           write_array(v_p,"v",tstep/outputinterval);
+           write_array(eta_p,"eta",tstep/outputinterval);
+
+           if (NHOUTFLAG == true) 
+               write_array(z,"z",tstep/outputinterval);
+          
+           //append current time to times file
+           if (master()) {
+               timefile.open ("times", ios::out | ios::app);
+               timefile << t << "\n";
+               timefile.close();
+           }
+       }  // end output 'if'
+
+       //generic log-style text output to screen
+       if(!(tstep % 100) || tstep < 20) {
+           if (master()) printf("Completed time %g (tstep %d)\n",t,tstep);
+           double mu = psmax(max(abs(u_p))), mv = psmax(max(abs(v_p))), meta = pvmax(eta_p);
+           if (master()) printf("Max u %g, v %g, eta %g\n",mu,mv,meta);
+       }
+
+       //cycle fields for next timestep.
+       DTArray * tmp ;
+       tmp = u_levels[0];
+       u_levels[0] = u_levels[1];
+       u_levels[1] = u_levels[2];
+       u_levels[2] = tmp;
+       tmp = v_levels[0];
+       v_levels[0] = v_levels[1];
+       v_levels[1] = v_levels[2];
+       v_levels[2] = tmp;
+       tmp = eta_levels[0];
+       eta_levels[0] = eta_levels[1];
+       eta_levels[1] = eta_levels[2];
+       eta_levels[2] = tmp;
+
+
+   } //end Leapfrog while loop
+   
+   double endtime = MPI_Wtime();
+   double runtime = endtime-starttime;
+   if (master()) {
+        printf("Finished run. Run-time = %g s \n", runtime);
+        timefile.open ("runtime", ios::out | ios::trunc);
+        timefile << runtime << "\n";
+        timefile.close();
+   }
+   
+   // free memory of residual and basis of gmres solver 
+   a.free_resid(init_r);
+   a.free_basis(final_u);
+
+    
+   MPI_Finalize();
+   return 0;
+}
+
+

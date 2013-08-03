@@ -137,9 +137,6 @@ class Cheb_2dmg : public GMRES_Interface < fbox * , ubox *> {
       void basis_scale(ubox * & vec, double scale);
 
       bool noisy() const;
- 
-      // Derek: method for setting variable coefficients
-      void set_ci(DTArray * cin, int i); 
 
    private:
       // Allocation data
