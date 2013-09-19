@@ -133,6 +133,10 @@ namespace Timestep {
    void get_coeff(const Stepped<double> & times, 
                   Stepped<double> & coeffs_left,
                   Stepped<double> & coeffs_right);
+
+   //Derek
+   void get_ab3_coeff(const Stepped<double> & times,
+                  Stepped<double> & ab3coeffs);
 }
 
 #endif // TIMESTEP_HPP

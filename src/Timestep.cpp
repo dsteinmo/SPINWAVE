@@ -103,4 +103,38 @@ namespace Timestep {
       }
       return;
    }
+   // Derek:
+   void get_ab3_coeff(const Stepped<double> & times,
+                  Stepped<double> & ab3_coeffs) {
+      assert(times.size() == 4);
+      assert(ab3_coeffs.size() == 4);
+  
+      //Note to self: this is only correct for equispaced time-steps
+      //need to integrate lagrange polys to work for arbitrary 'times'
+      if (times[1] == times[0] && times[0] == times[-1] && times[-1] == times[-2]) {
+         std::cout << "Error: all times equal in ab3coef!" << std::endl;
+      }
+      else if (times[0] == times[-1] && times[-1] == times[-2])  {
+          // FE case
+          ab3_coeffs[1]=1.0;
+          ab3_coeffs[0]=0.0;
+          ab3_coeffs[-1]=0.0;
+          ab3_coeffs[-2]=0.0;
+      }
+      else if (times[-1] == times[-2]) {
+          //AB2 case
+          ab3_coeffs[1] = 1.5;
+          ab3_coeffs[0] =-0.5;
+          ab3_coeffs[-1] =0.0;
+          ab3_coeffs[-2] =0.0;
+      }
+      else {
+          //Ab3 case (general)
+          ab3_coeffs[1] = 23.0/12.0;
+          ab3_coeffs[0] =-16.0/12.0;
+          ab3_coeffs[-1] =  5.0/12.0;
+          ab3_coeffs[-2] = 0.0;
+     }
+      return;
+   }
 }

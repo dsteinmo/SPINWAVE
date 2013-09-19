@@ -1,5 +1,8 @@
 # This file contains a list of things to *not* add to the git repository
 
+# test/debugging directory
+/test
+
 # Object files
 *.o
 
