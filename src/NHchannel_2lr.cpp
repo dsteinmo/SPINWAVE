@@ -1,3 +1,7 @@
+//TODO: Figure out how small of a time-step we need to run
+//for AB3 to not die
+//AB2 survives at 128x128
+
 #include "TArray.hpp"
 #include <blitz/array.h>
 #include "T_util.hpp"
@@ -39,6 +43,9 @@ using namespace Timestep;
 #define Nx 128
 #define Ny 128
 
+// #define Nx 128 //stuff blowing up near top boundary. why???
+// #define Ny 128 //blows up for 128x128 and bigger
+
 // Grid lengths
 
 //#define Lx 2000.0
@@ -48,7 +55,6 @@ using namespace Timestep;
 #define Ly 3000.0
 
 // Defines for physical parameters
-// #define G (0.0025*9.81)
 #define G (0.02)
 #define EARTH_OMEGA (2*M_PI/(24*3600))
 #define EARTH_RADIUS (6371e3)
@@ -59,31 +65,31 @@ using namespace Timestep;
 //#define ROT_F (2*EARTH_OMEGA*sin(LATITUDE))
 #define ROT_B (0*2*EARTH_OMEGA*cos(LATITUDE)/EARTH_RADIUS)
 #define H2_0 (2.5) 
-#define H1_0 (7.5)
 #define H2_DEPTH (H2_0 + 0*cos(M_PI*y(kk)/Ly)*sin(4*M_PI*x(ii)/Lx))
-#define H1_DEPTH (H1_0 + 0*y(kk) + 0*x(ii));
-
+#define H1_0 (7.5)
+#define H1_DEPTH (H1_0 + 0*kk)
 // Can probably include defines for initial conditions here.
 
 // Timestep parameters
-// #define FINAL_T (3600.0*24.0)
 #define FINAL_T (20000.0)
-#define INITIAL_T 0.0
-#define SAFETY_FACTOR 0.1 //changed from .25 as of Aug 3, 2013.
+//#define FINAL_T (3600.0*24.0*3.0)
+#define INITIAL_T (0.0)
+#define SAFETY_FACTOR (0.1) //changed from .25 as of Aug 3, 2013.
 //#define SAFETY_FACTOR 0.0025
-#define NUMOUTS 200.0
+#define NUMOUTS (200.0)
 
 // Filtering parameters
-#define FILTER_ON false
-#define F_CUTOFF 0.4  //0.4 usually
-#define F_ORDER 4
-#define F_STREN (-0.33)  // ask Chris why negative.
+#define FILTER_ON true
+#define F_CUTOFF (0.0)  //0.4 usually. 0.4 and 0.9 makes it die.
+#define F_ORDER (4)
+//#define F_STREN (-0.33)  // ask Chris why negative.
+#define F_STREN (1e-15)
 
 // GMRES parameters
-#define MAXIT 30
-#define TOL 1.0e-8
-#define RESTARTS 1
-#define NOISYGMRES true
+#define MAXIT (40)
+#define TOL (1.0e-11)
+#define RESTARTS (1)
+#define NOISYGMRES (false)
 
 // do we want to output at all?
 #define OUTFLAG true
@@ -108,7 +114,7 @@ int main(int argc, char ** argv) {
    x = (ii+0.5)/Nx*2*M_PI;
    y = -cos(M_PI*ii/(Ny-1));
 
-   // get chebyshev matrix on [-1,1]
+   // get cheb matrix on [-1,1]
    Dy = chebmat(Ny);
 
    //adjust from standard grids to physical grids
@@ -140,12 +146,11 @@ int main(int argc, char ** argv) {
    // Necessary FFT transformers (for filtering)
    TransWrapper XY_xform(Nx,1,Ny,FOURIER,NONE,CHEBY);
 
-   // Allocate space for flow variables (3-timesteps for leapfrog)
-   // going with primitive (not conservative) form.
+   // Allocate space for flow variables (2-timesteps for AB)
    vector<DTArray *> u1_levels(2);
    vector<DTArray *> u2_levels(2);
-   vector<DTArray *> v1_levels(2); 
-   vector<DTArray *> v2_levels(2); 
+   vector<DTArray *> v1_levels(2);
+   vector<DTArray *> v2_levels(2);  
    vector<DTArray *> eta_levels(2);
    vector<DTArray *> h1_levels(2);
    vector<DTArray *> h2_levels(2);
@@ -172,11 +177,13 @@ int main(int argc, char ** argv) {
    v2_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
 
    eta_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
-   eta_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
-    h1_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
-    h1_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
-    h2_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
-    h2_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
+   eta_levels[1] = new DTArray(local_lbound,local_extent,local_storage);   
+
+   h1_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
+   h1_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
+  
+   h2_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
+   h2_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
 
    hu1_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
    hu1_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
@@ -191,7 +198,7 @@ int main(int argc, char ** argv) {
    rhsh2_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
    rhsh2_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
    rhsh2_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
-  
+
    rhshu1_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
    rhshu1_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
    rhshu1_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
@@ -199,7 +206,7 @@ int main(int argc, char ** argv) {
    rhshu2_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
    rhshu2_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
    rhshu2_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
-  
+
    rhshv1_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
    rhshv1_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
    rhshv1_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
@@ -207,57 +214,65 @@ int main(int argc, char ** argv) {
    rhshv2_levels[0] = new DTArray(local_lbound,local_extent,local_storage);
    rhshv2_levels[1] = new DTArray(local_lbound,local_extent,local_storage);
    rhshv2_levels[2] = new DTArray(local_lbound,local_extent,local_storage);
-  
- 
+
+
    // Allocate arrays for depth profiles
    DTArray H1(local_lbound,local_extent,local_storage);
    DTArray H2(local_lbound,local_extent,local_storage);   
    DTArray He(local_lbound,local_extent,local_storage);
    DTArray  H(local_lbound,local_extent,local_storage);
-   DTArray Hx(local_lbound,local_extent,local_storage);
-   DTArray Hy(local_lbound,local_extent,local_storage);
+   DTArray  Hx(local_lbound,local_extent,local_storage);
+   DTArray  Hy(local_lbound,local_extent,local_storage);
 
-   DTArray dump(local_lbound,local_extent,local_storage);
+   // Allocate arrays for forcing
+   DTArray F1x(local_lbound,local_extent,local_storage);
+   DTArray F1y(local_lbound,local_extent,local_storage);
+   DTArray F2x(local_lbound,local_extent,local_storage);
+   DTArray F2y(local_lbound,local_extent,local_storage);
+
+   DTArray hu1_star(local_lbound,local_extent,local_storage);
+   DTArray hv1_star(local_lbound,local_extent,local_storage);
+   DTArray hu2_star(local_lbound,local_extent,local_storage);
+   DTArray hv2_star(local_lbound,local_extent,local_storage);
+   DTArray u1_star(local_lbound,local_extent,local_storage);
+   DTArray v1_star(local_lbound,local_extent,local_storage);
+   DTArray u2_star(local_lbound,local_extent,local_storage);
+   DTArray v2_star(local_lbound,local_extent,local_storage);
+
 
    // set equal to expression defined in pre-processing
-   H1 = H1_DEPTH
+   H1 = H1_DEPTH;
    H2 = H2_DEPTH;
    H  = H1+H2;  
    He = (H1*H2)/H;
    double Hmax = max(H);
-   //double Hemax = max(He);
-   //double c0max = sqrt(G*Hemax);
+   double Hemax = max(He);
+   double c0max = sqrt(G*Hemax);
 
    // set initial conditions
    //*eta_levels[1] = 0;
    *eta_levels[0] = (y(kk)-Ly/2)/Ly; //linear tilt
    // *eta_levels[1] = cos(M_PI*y(kk)/Ly); //half cosine (like a linear tilt)
-   //*eta_levels[1] = (H2_0/4)*exp(-.1*((y(kk)/1e2)*(y(kk)/1e2))
-   //.                             -1*((x(ii)-0.5*Lx)/3e2)*((x(ii)-0.5*Lx)/3e2));
-
-   //*eta_levels[1] = -1*pow(cosh((x(ii)-Lx)/250),2)*sin(M_PI*x(ii)/Lx)*exp(-y(kk)/800);
+   //*eta_levels[1] = (H0/4)*exp(-.1*((y(kk)/1e2)*(y(kk)/1e2))
+   //                             -1*((x(ii)-0.5*Lx)/3e2)*((x(ii)-0.5*Lx)/3e2));
 
   // *u_levels[1] = 1;
-  // *u_levels[1] = 0.0;
-  //  *u_levels[1] = (c0max/H0)*(*eta_levels[1]);
-   *u1_levels[0] = 0.0*kk;
-   *u2_levels[0] = 0.0*kk;
-   *v1_levels[0] = 0.0*kk;
-   *v2_levels[0] = 0.0*kk;
+    *u1_levels[0] = 0.0;
+    *u2_levels[0] = 0.0;
+    *v1_levels[0] = 0.0;
+    *v2_levels[0] = 0.0;
 
-   *h1_levels[0] = H1-*eta_levels[0];
-   *h2_levels[0] = H2+*eta_levels[0];
-
-   *hu1_levels[0] = *h1_levels[0]*(*u1_levels[0]);
-   *hv1_levels[0] = *h1_levels[0]*(*v1_levels[0]);
-
-   *hu2_levels[0] = *h2_levels[0]*(*u2_levels[0]);
-   *hv2_levels[0] = *h2_levels[0]*(*v2_levels[0]);
+    *h1_levels[0] = H1 - *eta_levels[0];
+    *h2_levels[0] = H2 + *eta_levels[0];
+   //*u_levels[1] = (c0max/H0)*(*eta_levels[1]);
+   
+   //*v_levels[1] = 0.0;
 
    int tstep = 0;  //time-step counter
    // Compute time-stepping details
-   // double dt = SAFETY_FACTOR*fmin(Lx/Nx,Ly/Ny)/c0max;
-   double dt = 1.2;
+   //double dt = SAFETY_FACTOR*fmin(Lx/Nx,Ly/Ny)/c0max;
+     double dt = 1.2;
+   //double dt = 0.6;
    // this assumes uniform spacing in Cheby (y-)direction, should fix.
    double t = INITIAL_T;
 
@@ -269,9 +284,9 @@ int main(int argc, char ** argv) {
    get_ab3_coeff(times,coeffs_right);
 
    double numsteps = (FINAL_T - INITIAL_T)/dt;
-   int outputinterval = (int) ceil(numsteps/NUMOUTS);
+   int outputinterval = (int) floor(numsteps/NUMOUTS);
    if (master()) printf("Using timestep of %gs, with final time of %gs\n",dt,FINAL_T);
-   // if (master()) printf("Reference: C_0_max = %g m/s, dx = %g m, dy = %g m\n",c0max,Lx/Nx,Ly/Ny);
+   if (master()) printf("Reference: C_0_max = %g m/s, dx = %g m, dy = %g m\n",c0max,Lx/Nx,Ly/Ny);
 
    // initialize output stream for times file, and write out initial time.
    ofstream timefile;
@@ -281,24 +296,24 @@ int main(int argc, char ** argv) {
        timefile.close();
    }
 
-   // Allocate space for auxiliary elliptic variable and rigid-lid pressure
+   // Allocate space for auxiliary elliptic variable
    DTArray z(local_lbound,local_extent,local_storage);
    DTArray p(local_lbound,local_extent,local_storage);
-
+   DTArray dump(local_lbound,local_extent,local_storage);
 
    if (OUTFLAG == true)  {
        write_reader(*eta_levels[0],"eta",true);
-       write_reader(*u1_levels[0],"u1",true);
-       write_reader(*u2_levels[0],"u2",true);
-       write_reader(*v1_levels[0],"v1",true);
-       write_reader(*v2_levels[0],"v2",true);
+       write_reader(*u1_levels[0],"u",true);
+       write_reader(*v1_levels[0],"v",true);
+       write_reader(*u2_levels[0],"u",true);
+       write_reader(*v2_levels[0],"v",true);
        write_reader(H,"H");
 
        write_array(*eta_levels[0],"eta",tstep/outputinterval); 
-       write_array(*u1_levels[0],"u1",tstep/outputinterval);
-       write_array(*u2_levels[0],"u2",tstep/outputinterval);
-       write_array(*v1_levels[0],"v1",tstep/outputinterval);
-       write_array(*v2_levels[0],"v2",tstep/outputinterval);
+       write_array(*u1_levels[0],"u",tstep/outputinterval);
+       write_array(*v1_levels[0],"v",tstep/outputinterval);
+       write_array(*u2_levels[0],"u",tstep/outputinterval);
+       write_array(*v2_levels[0],"v",tstep/outputinterval);
        write_array(H,"H");
 
        if (NHOUTFLAG == true) 
@@ -309,29 +324,17 @@ int main(int argc, char ** argv) {
    DTArray temp1(local_lbound,local_extent,local_storage),
            temp2(local_lbound,local_extent,local_storage),
            temp3(local_lbound,local_extent,local_storage),
-           temp4(local_lbound,local_extent,local_storage),
-           temp5(local_lbound,local_extent,local_storage); 
+           temp4(local_lbound,local_extent,local_storage);
 
-   // Allocate space for forcing vectors
-   DTArray F1x(local_lbound,local_extent,local_storage),
-           F1y(local_lbound,local_extent,local_storage),
-           F2x(local_lbound,local_extent,local_storage),
-           F2y(local_lbound,local_extent,local_storage);
+   // Allocate space for forcing vector
+   DTArray Fx(local_lbound,local_extent,local_storage),
+           Fy(local_lbound,local_extent,local_storage);
 
    // Allocate space for elliptic problem variable coefficients.
    DTArray cx(local_lbound,local_extent,local_storage),
            cxx(local_lbound,local_extent,local_storage),
            cy(local_lbound,local_extent,local_storage),
            cyy(local_lbound,local_extent,local_storage);
-
-   DTArray hu1_star(local_lbound,local_extent,local_storage),
-           hv1_star(local_lbound,local_extent,local_storage),
-           hu2_star(local_lbound,local_extent,local_storage),
-           hv2_star(local_lbound,local_extent,local_storage),
-            u1_star(local_lbound,local_extent,local_storage),
-            v1_star(local_lbound,local_extent,local_storage),
-            u2_star(local_lbound,local_extent,local_storage),
-            v2_star(local_lbound,local_extent,local_storage);
 
    // write grids to file
    temp1 = x(ii) + 0*kk;
@@ -354,16 +357,15 @@ int main(int argc, char ** argv) {
    cxx = (H1*H2)/3 + (H2*H2)/3;  //coeff of z_xx
    cyy = (H1*H2)/3 + (H2*H2)/3;  //coeff of z_yy
    
-   //cx & cy (coefs of z_x and z_y) are the derivatives of NHCoeff
+   //cx & cy (coefs of z_x and z_y) are the derivatives of H2o6 
    //we'll get them numerically.
    mygrad.setup_array(&cxx,FOURIER,NONE,CHEBY);
    mygrad.get_dx(&cx);  //get x derivative, store in cx
    mygrad.get_dz(&cy);  //get y derivative, store in cy 
-   
-   //get derivatives of bathym.
+
    mygrad.setup_array(&H,FOURIER,NONE,CHEBY);
-   mygrad.get_dx(&Hx);  //get x derivative of H
-   mygrad.get_dz(&Hy);  //get y derivative of H
+   mygrad.get_dx(&Hx);
+   mygrad.get_dz(&Hy);
 
    //these have been validated against matlab code.
    /* write_array(cxx,"H2o6");
@@ -379,8 +381,10 @@ int main(int argc, char ** argv) {
    Cheb_2dmg lapsolver(Nx,Ny);  //Poisson solver
   
    int itercount; //gmres iteration count  
-   double dbc=0.0;
-   double nbc=1.0;
+   double zdbc=0.0;
+   double znbc=-1.0;
+   double xdbc=0.0;
+   double xnbc=0.0;  
 
    // set Helmholtz variable coefs (must do before set_grad)
    a.set_ci(&cx,1);  //coeff of zx
@@ -391,7 +395,9 @@ int main(int argc, char ** argv) {
    a.set_grad(&mygrad); // need to do this before set_bc 
 
    // set_bc, calling sequence is helm, dir., neu., S_EXP ('x' series expans)
-   a.set_bc(-1.0,dbc,nbc,FOURIER,dbc,nbc); // Sign of 'helm' opposite that of 1D code.  %trailing zeros new as of Aug. 3, 2013.
+   //old version was a.set_bc(-1.0,dbc,nbc,FOURIER);
+   a.set_bc(-1.0,zdbc,znbc,FOURIER,xdbc,xnbc); // Sign of 'helm' opposite that of 1D code.  %trailing zeros new as of Aug. 3, 2013.
+   //may be setting this up wrong, ask the Subich-man
 
    lapsolver.set_ci(&Hx,1); // coeff of px
    lapsolver.set_ci(&H,2);  // coeff of pxx
@@ -399,7 +405,7 @@ int main(int argc, char ** argv) {
    lapsolver.set_ci(&H,4);  // coeff of pyy
 
    lapsolver.set_grad(&mygrad);
-   lapsolver.set_bc(0.0,dbc,nbc,FOURIER,dbc,nbc); //Helmholtz = 0.0
+   lapsolver.set_bc(0.0,zdbc,znbc,FOURIER,xdbc,xnbc); //Helmholtz = 0.0
 
    // Initialize structures that are used by gmres object
    fbox * init_r_helm = a.alloc_resid();
@@ -491,24 +497,25 @@ int main(int argc, char ** argv) {
        
 
        // filter free surface
-       if (FILTER_ON == true)
-         filter3(eta_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+       //if (FILTER_ON == true)
+       //  filter3(eta_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
 
        //impose explicit Neuman conditions on eta.
-       double neurhs1 = 0.0;
+      double neurhs1 = 0.0;
        double neurhs2 = 0.0;
        for (int j=local_lbound(0); j<(local_lbound(0)+local_extent(0)); j++) {
            neurhs1 = sum(-Dy(0,Range(1,Ny-2))*eta_np1(j,0,Range(1,Ny-2)));
            neurhs2 = sum(-Dy(Ny-1,Range(1,Ny-2))*eta_np1(j,0,Range(1,Ny-2)));
 
            // perform 2x2 matrix product at each point 
-           eta_np1(j,0,0)   = neumatinv(0,0)*neurhs1 + neumatinv(0,1)*neurhs2;
-           eta_np1(j,0,Ny-1) = neumatinv(1,0)*neurhs1+ neumatinv(1,1)*neurhs2;
-       }
+           eta_np1(j,0,0)   = (neumatinv(0,0)*neurhs1 + neumatinv(0,1)*neurhs2);
+           eta_np1(j,0,Ny-1) = (neumatinv(1,0)*neurhs1+ neumatinv(1,1)*neurhs2);
+       }  //this code is right.
 
        //compute h1np1 and h2np1
        h2_np1 = H2+eta_np1;
-       h1_np1 = H-h2_np1;
+       //h1_np1 = H-h2_np1;
+       h1_np1 = H1-eta_np1;
 
        //TODO: compute u1_rhs_n, u2_rhs_n, v1_rhs_n, v2_rhs_n and time-step
        // the momentum equations.
@@ -563,6 +570,7 @@ int main(int argc, char ** argv) {
        //add interfacial pressure gradient
        rhshv2_n = rhshv2_n - G*(h2_n*dump);
 
+       // cout << "rhshv2_n:" << rhshv2_n << endl;
 
        //write_reader(eta_n,"etan"); 
        //write_array(eta_n,"etan");
@@ -585,6 +593,8 @@ int main(int argc, char ** argv) {
        //compute - divergence of \vec{a}, store in rhs for helmholtz problem
        rhs = -(a1x+a2y);
 
+       // cout << "rhshelm:" << rhs << endl;
+ 
        write_reader(rhshu2_n,"rhshu2");
        write_array(rhshu2_n,"rhshu2");
 
@@ -596,7 +606,9 @@ int main(int argc, char ** argv) {
 
        //set bc's on RHS - TODO: there might be a sign error on one of the BC's
        rhs(Range::all(),0,0)   =-rhshv2_n(Range::all(),0,0)/cxx(Range::all(),0,0);
-       rhs(Range::all(),0,Ny-1)=-rhshv2_n(Range::all(),0,Ny-1)/cxx(Range::all(),0,Ny-1); 
+       rhs(Range::all(),0,Ny-1)= rhshv2_n(Range::all(),0,Ny-1)/cxx(Range::all(),0,Ny-1);  //recent sign change. 
+
+       // cout << "rhshelm w/ bc's:" << rhs << endl;
 
        write_reader(rhs,"rhshelm");
        write_array(rhs,"rhshelm");
@@ -613,7 +625,9 @@ int main(int argc, char ** argv) {
 
        write_reader(z,"z");
        write_array(z,"z");
-     
+
+       // cout << "z:" << z << endl;
+ 
        // Do actual time-stepping of hyperbolic terms
        hu1_star = hu1_n + dt*(coeffs_right[1]*rhshu1_n
                             +coeffs_right[0]*rhshu2_nm1
@@ -631,6 +645,7 @@ int main(int argc, char ** argv) {
                             +coeffs_right[0]*rhshv2_nm1
                             +coeffs_right[-1]*rhshv2_nm2);
  
+       // cout << "hv2_star:" << hv2_star << endl;
 
        //compute gradient of NH pressure, then time-step it in lower layer
        mygrad.setup_array(&z,FOURIER,NONE,CHEBY);
@@ -638,6 +653,8 @@ int main(int argc, char ** argv) {
        hu2_star = hu2_star + dt*(cxx*temp); //cxx = NH Coeff
        mygrad.get_dz(&temp,false); // z_y
        hv2_star = hv2_star + dt*(cxx*temp); //cxx = NH Coeff
+
+       // cout << "hv2_star (after NH correction):" << hv2_star << endl;
 
        //TODO: Here hv2_star seems a little off when compared to matlab code.
 
@@ -679,6 +696,7 @@ int main(int argc, char ** argv) {
        mygrad.get_dx(&a1x,false);
 
        temp = (hv1_star + hv2_star); //a2
+       // cout << temp << endl;
        mygrad.setup_array(&temp,FOURIER,NONE,CHEBY);
        mygrad.get_dz(&a2y,false);
 
@@ -688,15 +706,19 @@ int main(int argc, char ** argv) {
        write_reader(a2y,"hvtoty");
        write_array(a2y,"hvtoty");
 
+       //if (master())
+       //     cout << a2y << endl;     
+
        //compute - divergence of \vec{a}, store in rhs for helmholtz problem
        rhs = (1/dt)*(a1x+a2y);
 
        //set bc's on RHS -- temp contains hvtot_star 
        temp = hv1_star + hv2_star;
        rhs(Range::all(),0,0)   = (1/dt)*temp(Range::all(),0,0);
-       rhs(Range::all(),0,Ny-1)= (1/dt)*temp(Range::all(),0,Ny-1);
+       rhs(Range::all(),0,Ny-1)= - (1/dt)*temp(Range::all(),0,Ny-1); //recent sign change
 
-       //solve for z (non-hydrostatic pressure) with gmres
+
+       //solve for z (hydrostatic pressure) with gmres
        *init_r_pois->gridbox = rhs;
 
        itercount = mysolverPois.Solve(final_u_pois,init_r_pois,TOL,MAXIT,RESTARTS);
@@ -705,15 +727,22 @@ int main(int argc, char ** argv) {
 
        p = *final_u_pois->gridbox;
 
+       // cout << "p:" << p << endl;
+
        //compute gradient of pressure, then time-step it in each layer
        mygrad.setup_array(&p,FOURIER,NONE,CHEBY);
        mygrad.get_dx(&temp,false); // p_x
        hu1_np1 = hu1_star - dt*(h1_np1*temp);
-       hu2_np1 = hu2_star - dt*(h1_np1*temp); 
+       hu2_np1 = hu2_star - dt*(h2_np1*temp); 
 
        mygrad.get_dz(&temp,false); // p_y
        hv1_np1 = hv1_star - dt*(h1_np1*temp);
        hv2_np1 = hv2_star - dt*(h2_np1*temp);
+
+       // cout << "hv2_np1: " << hv2_np1 << endl;
+       // cout << "hv1_np1: " << hv1_np1 << endl;
+
+       //return 0;
 
        //Recover v field
        v1_np1 = hv1_np1 / h1_np1;
@@ -721,7 +750,11 @@ int main(int argc, char ** argv) {
 
        //Impose BCs on v at y=0,L_y (Dirichlet -> no normal flow)
        v1_np1(Range::all(),0,0) =0;
+       v1_np1(Range::all(),0,Ny-1) = 0;
+       
+       v2_np1(Range::all(),0,0) =0;
        v2_np1(Range::all(),0,Ny-1) = 0;
+    
        
        //Re-form transports
        hv1_np1 = h1_np1*v1_np1;
@@ -733,17 +766,19 @@ int main(int argc, char ** argv) {
        //cout << t << endl;
 
        //shift down 'stepped' times array by 1, and set new time.
+       //AB3
        //times[-2] = times[-1];
        //times[-1] = times[0];
        //times[0] = times[1];
        //times[1] = t+dt;
 
+       //AB2
        times[-2] = times[0];
        times[-1] = times[0];
        times[0]=times[1];
        times[1]=t+dt;
       
-       cout << times; 
+       // cout << times; 
        get_ab3_coeff(times,coeffs_right);
 
        write_reader(p,"p");
@@ -764,12 +799,9 @@ int main(int argc, char ** argv) {
        write_array(p,"p");
        write_array(rhs,"rhspois");     
 
-       //TODO: p is wrong for sure! dawg!
 
-       //return 0; 
-
-       if (master())
-           cout << coeffs_right << endl;
+       //if (master())
+       //    cout << coeffs_right << endl;
 
 
        // Check if it's time to output
@@ -794,7 +826,7 @@ int main(int argc, char ** argv) {
 
        //generic log-style text output to screen
        if(!(tstep % 100) || tstep < 20) {
-           cout << "test" << endl;
+           // cout << "test" << endl;
            if (master()) printf("Completed time %g (tstep %d)\n",t,tstep);
            double mu1 = psmax(max(abs(u1_np1))), mv1 = psmax(max(abs(v1_np1))), meta = pvmax(eta_np1);
            if (master()) printf("Max u1 %g, v1 %g, eta %g\n",mu1,mv1,meta);
