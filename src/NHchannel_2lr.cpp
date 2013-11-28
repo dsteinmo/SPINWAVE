@@ -2,6 +2,15 @@
 //for AB3 to not die
 //AB2 survives at 128x128
 
+//stuff is messing up near the boundaries and it looks like
+//the problem originates in the z-field BC's
+//going to try switching sign of those bc's.
+//that didn't help, switching signs back and turning off NH
+//terms all together.
+//turning off NH terms did not stabilize it, turning back on.
+//trying to run with half amplitude. -> lasted longer, but still messes up
+//trying to turn off filter.
+
 #include "TArray.hpp"
 #include <blitz/array.h>
 #include "T_util.hpp"
@@ -40,8 +49,14 @@ using namespace Timestep;
 
 // Grid size
 
-#define Nx 128
-#define Ny 128
+//#define Nx 1024
+//#define Ny 128
+
+#define Nx 64
+#define Ny 64
+
+//#define Nx 16384
+//#define Ny 512
 
 // #define Nx 128 //stuff blowing up near top boundary. why???
 // #define Ny 128 //blows up for 128x128 and bigger
@@ -51,27 +66,27 @@ using namespace Timestep;
 //#define Lx 2000.0
 //#define Ly 4000.0 //using these works
 
-#define Lx 3000.0   //using these does
-#define Ly 3000.0
+#define Lx 60000.0   //using these does
+#define Ly 10000.0
 
 // Defines for physical parameters
-#define G (0.02)
+#define G (0.01*9.81)
 #define EARTH_OMEGA (2*M_PI/(24*3600))
 #define EARTH_RADIUS (6371e3)
 #define LATITUDE (M_PI/2)
 //#define ROT_F (10.0*1.5e-3)
 //#define ROT_F (7.8828e-5)
-#define ROT_F (0.0)
+#define ROT_F (1.0e-4)
 //#define ROT_F (2*EARTH_OMEGA*sin(LATITUDE))
 #define ROT_B (0*2*EARTH_OMEGA*cos(LATITUDE)/EARTH_RADIUS)
-#define H2_0 (2.5) 
+#define H2_0 (5.0) 
 #define H2_DEPTH (H2_0 + 0*cos(M_PI*y(kk)/Ly)*sin(4*M_PI*x(ii)/Lx))
-#define H1_0 (7.5)
+#define H1_0 (15.0)
 #define H1_DEPTH (H1_0 + 0*kk)
 // Can probably include defines for initial conditions here.
 
 // Timestep parameters
-#define FINAL_T (20000.0)
+#define FINAL_T (3600.0*24.0)
 //#define FINAL_T (3600.0*24.0*3.0)
 #define INITIAL_T (0.0)
 #define SAFETY_FACTOR (0.1) //changed from .25 as of Aug 3, 2013.
@@ -80,10 +95,14 @@ using namespace Timestep;
 
 // Filtering parameters
 #define FILTER_ON true
-#define F_CUTOFF (0.0)  //0.4 usually. 0.4 and 0.9 makes it die.
+#define F_CUTOFF (0.1)  //0.4 usually. 0.4 and 0.9 makes it die.
 #define F_ORDER (4)
 //#define F_STREN (-0.33)  // ask Chris why negative.
-#define F_STREN (1e-15)
+//#define F_STREN (1e-15)
+//#define F_STREN (34.5) //this should give 1e-15 values at high wavenumber.
+#define F_STREN (.1) //this should give 1e-8 values at high wavenumber.
+//#define F_STREN (1e-2) // this smooths things out
+//#define F_STREN (1e-15)  //this seems to do jack shit.
 
 // GMRES parameters
 #define MAXIT (40)
@@ -94,6 +113,11 @@ using namespace Timestep;
 // do we want to output at all?
 #define OUTFLAG true
 #define NHOUTFLAG true //output auxiliary variable, z?
+
+//time-stepper info
+#define AB2 1
+#define AB3 2
+#define TIMESTEPPER (AB2) // can be AB2 or AB3. AB3 is unstable, not sure why
 
 // Blitz index placeholders
 
@@ -251,7 +275,8 @@ int main(int argc, char ** argv) {
 
    // set initial conditions
    //*eta_levels[1] = 0;
-   *eta_levels[0] = (y(kk)-Ly/2)/Ly; //linear tilt
+   *eta_levels[0] = 0.5*sin(M_PI*x(ii)/Lx)*exp(-pow(((x(ii)-3.0e4)/5.0e3),2));
+   //*eta_levels[0] = 0.01*(y(kk)-Ly/2)/Ly; //linear tilt
    // *eta_levels[1] = cos(M_PI*y(kk)/Ly); //half cosine (like a linear tilt)
    //*eta_levels[1] = (H0/4)*exp(-.1*((y(kk)/1e2)*(y(kk)/1e2))
    //                             -1*((x(ii)-0.5*Lx)/3e2)*((x(ii)-0.5*Lx)/3e2));
@@ -271,7 +296,9 @@ int main(int argc, char ** argv) {
    int tstep = 0;  //time-step counter
    // Compute time-stepping details
    //double dt = SAFETY_FACTOR*fmin(Lx/Nx,Ly/Ny)/c0max;
-     double dt = 1.2;
+   double dt = 1.2; // works for AB2 test case
+   //double dt = 1.2/10; //fails for AB3 test case
+
    //double dt = 0.6;
    // this assumes uniform spacing in Cheby (y-)direction, should fix.
    double t = INITIAL_T;
@@ -303,17 +330,18 @@ int main(int argc, char ** argv) {
 
    if (OUTFLAG == true)  {
        write_reader(*eta_levels[0],"eta",true);
-       write_reader(*u1_levels[0],"u",true);
-       write_reader(*v1_levels[0],"v",true);
-       write_reader(*u2_levels[0],"u",true);
-       write_reader(*v2_levels[0],"v",true);
+       write_reader(*u1_levels[0],"u1",true);
+       write_reader(*v1_levels[0],"v1",true);
+       write_reader(*u2_levels[0],"u2",true);
+       write_reader(*v2_levels[0],"v2",true);
        write_reader(H,"H");
+       write_reader(p,"p",true);
 
        write_array(*eta_levels[0],"eta",tstep/outputinterval); 
-       write_array(*u1_levels[0],"u",tstep/outputinterval);
-       write_array(*v1_levels[0],"v",tstep/outputinterval);
-       write_array(*u2_levels[0],"u",tstep/outputinterval);
-       write_array(*v2_levels[0],"v",tstep/outputinterval);
+       write_array(*u1_levels[0],"u1",tstep/outputinterval);
+       write_array(*v1_levels[0],"v1",tstep/outputinterval);
+       write_array(*u2_levels[0],"u2",tstep/outputinterval);
+       write_array(*v2_levels[0],"v2",tstep/outputinterval);
        write_array(H,"H");
 
        if (NHOUTFLAG == true) 
@@ -497,8 +525,8 @@ int main(int argc, char ** argv) {
        
 
        // filter free surface
-       //if (FILTER_ON == true)
-       //  filter3(eta_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+       if (FILTER_ON == true)
+         filter3(eta_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
 
        //impose explicit Neuman conditions on eta.
       double neurhs1 = 0.0;
@@ -514,11 +542,8 @@ int main(int argc, char ** argv) {
 
        //compute h1np1 and h2np1
        h2_np1 = H2+eta_np1;
-       //h1_np1 = H-h2_np1;
-       h1_np1 = H1-eta_np1;
-
-       //TODO: compute u1_rhs_n, u2_rhs_n, v1_rhs_n, v2_rhs_n and time-step
-       // the momentum equations.
+       h1_np1 = H-h2_np1; //this line ensures no errors in mass conservation.
+       //h1_np1 = H1-eta_np1;
 
        //Layer 1, U eqn:
        temp = -hu1_n*u1_n;
@@ -570,17 +595,6 @@ int main(int argc, char ** argv) {
        //add interfacial pressure gradient
        rhshv2_n = rhshv2_n - G*(h2_n*dump);
 
-       // cout << "rhshv2_n:" << rhshv2_n << endl;
-
-       //write_reader(eta_n,"etan"); 
-       //write_array(eta_n,"etan");
-
-       //write_reader(h2_n,"h2n");
-       //write_array(h2_n,"h2n");
-
-       //write_reader(dump,"etay");
-       //write_array(dump,"etay");
-
        //form a1x and a2y:
        temp = rhshu2_n; //a1
        mygrad.setup_array(&temp,FOURIER,NONE,CHEBY);
@@ -593,26 +607,10 @@ int main(int argc, char ** argv) {
        //compute - divergence of \vec{a}, store in rhs for helmholtz problem
        rhs = -(a1x+a2y);
 
-       // cout << "rhshelm:" << rhs << endl;
- 
-       write_reader(rhshu2_n,"rhshu2");
-       write_array(rhshu2_n,"rhshu2");
-
-       write_reader(rhshv2_n,"rhshv2");
-       write_array(rhshv2_n,"rhshv2");
-
-       write_reader(rhs,"rhshelm");
-       write_array(rhs,"rhshelm");
-
        //set bc's on RHS - TODO: there might be a sign error on one of the BC's
        rhs(Range::all(),0,0)   =-rhshv2_n(Range::all(),0,0)/cxx(Range::all(),0,0);
-       rhs(Range::all(),0,Ny-1)= rhshv2_n(Range::all(),0,Ny-1)/cxx(Range::all(),0,Ny-1);  //recent sign change. 
+       rhs(Range::all(),0,Ny-1)= rhshv2_n(Range::all(),0,Ny-1)/cxx(Range::all(),0,Ny-1);  //recent sign change.
 
-       // cout << "rhshelm w/ bc's:" << rhs << endl;
-
-       write_reader(rhs,"rhshelm");
-       write_array(rhs,"rhshelm");
-   
        //solve for z (non-hydrostatic pressure) with gmres
        *init_r_helm->gridbox = rhs;
 
@@ -623,8 +621,6 @@ int main(int argc, char ** argv) {
 
        z = *final_u_helm->gridbox;
 
-       write_reader(z,"z");
-       write_array(z,"z");
 
        // cout << "z:" << z << endl;
  
@@ -653,22 +649,6 @@ int main(int argc, char ** argv) {
        hu2_star = hu2_star + dt*(cxx*temp); //cxx = NH Coeff
        mygrad.get_dz(&temp,false); // z_y
        hv2_star = hv2_star + dt*(cxx*temp); //cxx = NH Coeff
-
-       // cout << "hv2_star (after NH correction):" << hv2_star << endl;
-
-       //TODO: Here hv2_star seems a little off when compared to matlab code.
-
-       write_reader(hu1_star,"hu1star");
-       write_array(hu1_star,"hu1star");
-       
-       write_reader(hv1_star,"hv1star");
-       write_array(hv1_star,"hv1star");
-  
-       write_reader(hu2_star,"hu2star");
-       write_array(hu2_star,"hu2star");
-
-       write_reader(hv2_star,"hv2star");
-       write_array(hv2_star,"hv2star");
 
        //recover predicted velocities
        u1_star = hu1_star / h1_np1;
@@ -699,12 +679,6 @@ int main(int argc, char ** argv) {
        // cout << temp << endl;
        mygrad.setup_array(&temp,FOURIER,NONE,CHEBY);
        mygrad.get_dz(&a2y,false);
-
-       write_reader(a1x,"hutotx");
-       write_array(a1x,"hutotx");
-
-       write_reader(a2y,"hvtoty");
-       write_array(a2y,"hvtoty");
 
        //if (master())
        //     cout << a2y << endl;     
@@ -744,9 +718,12 @@ int main(int argc, char ** argv) {
 
        //return 0;
 
-       //Recover v field
+       //Recover v field & u field
        v1_np1 = hv1_np1 / h1_np1;
        v2_np1 = hv2_np1 / h2_np1;
+
+       u1_np1 = hu1_np1 / h1_np1;
+       u2_np1 = hu2_np1 / h2_np1;
 
        //Impose BCs on v at y=0,L_y (Dirichlet -> no normal flow)
        v1_np1(Range::all(),0,0) =0;
@@ -754,64 +731,65 @@ int main(int argc, char ** argv) {
        
        v2_np1(Range::all(),0,0) =0;
        v2_np1(Range::all(),0,Ny-1) = 0;
+
+      
+       //filter corrected velocities
+       if (FILTER_ON == true) {
+         filter3(u1_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+         filter3(v1_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+         filter3(u2_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+         filter3(v2_np1,XY_xform,FOURIER,NONE,CHEBY,F_CUTOFF,F_ORDER,F_STREN);
+       }
+   
     
        
        //Re-form transports
        hv1_np1 = h1_np1*v1_np1;
        hv2_np1 = h2_np1*v2_np1;
 
+       hu1_np1 = h1_np1*u1_np1;
+       hu2_np1 = h2_np1*u2_np1;
+
        //increment time.
        tstep++;
        t+=dt;
        //cout << t << endl;
 
-       //shift down 'stepped' times array by 1, and set new time.
-       //AB3
-       //times[-2] = times[-1];
-       //times[-1] = times[0];
-       //times[0] = times[1];
-       //times[1] = t+dt;
-
-       //AB2
-       times[-2] = times[0];
-       times[-1] = times[0];
-       times[0]=times[1];
-       times[1]=t+dt;
+       if (TIMESTEPPER == AB3){
+           //shift down 'stepped' times array by 1, and set new time.
+           //AB3
+       	   times[-2] = times[-1];
+           times[-1] = times[0];
+           times[0] = times[1];
+           times[1] = t+dt;
+       }
+       else if (TIMESTEPPER == AB2){
+           //AB2
+           times[-2] = times[0];
+           times[-1] = times[0];
+           times[0]=times[1];
+           times[1]=t+dt;
+       }
+       else {
+           if (master())
+               cout << "Invalid timestepper, exiting..." << endl;
+               return 0;
+       }
       
        // cout << times; 
        get_ab3_coeff(times,coeffs_right);
 
-       write_reader(p,"p");
-       write_reader(z,"z");
-       write_reader(rhs,"rhspois");
-       write_reader(hv1_star,"hv1_star",true);
-       write_reader(hv2_star,"hv2_star",true);
-
-       write_array(*eta_levels[1],"eta",tstep/outputinterval);
-       write_array(*u1_levels[1],"u1",tstep/outputinterval);
-       write_array(*u2_levels[1],"u2",tstep/outputinterval);
-       write_array(*v1_levels[1],"v1",tstep/outputinterval);
-       write_array(*v2_levels[1],"v2",tstep/outputinterval);
-       write_array(hv1_star,"hv1_star",tstep/outputinterval);
-       write_array(hv2_star,"hv2_star",tstep/outputinterval);      
-     
-       write_array(z,"z");
-       write_array(p,"p");
-       write_array(rhs,"rhspois");     
-
-
-       //if (master())
-       //    cout << coeffs_right << endl;
-
-
        // Check if it's time to output
        if(!(tstep % outputinterval) && OUTFLAG == true){
-          if (master())
+           if (master())
                cout << "outputting at t=" << t << "\n";
 
-           write_array(u1_np1,"u1",tstep/outputinterval);
-           write_array(v1_np1,"v1",tstep/outputinterval);
-           write_array(eta_np1,"eta",tstep/outputinterval);
+           write_array(*eta_levels[1],"eta",tstep/outputinterval);
+           write_array(*u1_levels[1],"u1",tstep/outputinterval);
+           write_array(*u2_levels[1],"u2",tstep/outputinterval);
+           write_array(*v1_levels[1],"v1",tstep/outputinterval);
+           write_array(*v2_levels[1],"v2",tstep/outputinterval);
+           write_array(p,"p",tstep/outputinterval);
 
            if (NHOUTFLAG == true) 
                write_array(z,"z",tstep/outputinterval);
@@ -829,7 +807,14 @@ int main(int argc, char ** argv) {
            // cout << "test" << endl;
            if (master()) printf("Completed time %g (tstep %d)\n",t,tstep);
            double mu1 = psmax(max(abs(u1_np1))), mv1 = psmax(max(abs(v1_np1))), meta = pvmax(eta_np1);
-           if (master()) printf("Max u1 %g, v1 %g, eta %g\n",mu1,mv1,meta);
+           if (master()) {
+                printf("Max u1 %g, v1 %g, eta %g\n",mu1,mv1,meta);
+                if (isnan(mu1)) {
+                    printf("NaNs detected, terminating...");
+                    return 0;
+                }
+           }
+                
        }
 
        //cycle fields for next timestep by shuffling pointers.
