@@ -1,0 +1,6 @@
+SPINWAVE
+========
+
+SPINWAVE (Spectral Parallel Inviscid Non-hydrostatic WAVE equation solver) is a fork of the SPINS (Spectral Parallel Incompressible Navier-Stokes)  project that is meant for solving weakly non-hydrostatic layered models. That is, shallow water type systems of equations with dispersive correction terms.
+
+So far, there is a solver for a one-layer dispersive system and a two-layer with rigid-lid system. These are the make targets NHchannel_x and NHchannel_2lr_x, respectively. More details will be added as development on the project continues.
